@@ -192,7 +192,6 @@ fn compileRaylib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
             setDesktopPlatform(raylib, options.platform);
         },
         .linux => {
-
             if (options.platform == .drm) {
                 if (options.opengl_version == .auto) {
                     raylib.linkSystemLibrary("GLESv2");
@@ -206,37 +205,42 @@ fn compileRaylib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
                 raylib.root_module.addCMacro("PLATFORM_DRM", "");
                 raylib.root_module.addCMacro("EGL_NO_X11", "");
                 raylib.root_module.addCMacro("DEFAULT_BATCH_BUFFER_ELEMENT", "");
-            } else if (target.result.abi == .android) {
+            } else if (target.result.abi.isAndroid()) {
 
                 //these are the only tag options per https://developer.android.com/ndk/guides/other_build_systems
-                const hostTuple = switch(builtin.target.os.tag) {
-                    .linux =>   "linux-x86_64",
+                const hostTuple = switch (builtin.target.os.tag) {
+                    .linux => "linux-x86_64",
                     .windows => "windows-x86_64",
-                    .macos =>   "darwin-x86_64",
-                    else => {
-                        @panic("unsupported host OS");
-                    }
+                    .macos => "darwin-x86_64",
+                    else => @panic("unsupported host OS"),
                 };
 
-                const androidTriple = try target.result.linuxTriple(b.allocator);
+                const androidTriple = switch (target.result.cpu.arch) {
+                    .x86 => "i686-linux-android",
+                    .x86_64 => "x86_64-linux-android",
+                    .arm => "arm-linux-androideabi",
+                    .aarch64 => "aarch64-linux-android",
+                    .riscv64 => "riscv64-linux-android",
+                    else => error.InvalidAndroidTarget,
+                } catch @panic("invalid android target!");
                 const androidNdkPathString: []const u8 = options.android_ndk;
-                if(androidNdkPathString.len < 1) @panic("no ndk path provided and ANDROID_NDK_HOME is not set");
+                if (androidNdkPathString.len < 1) @panic("no ndk path provided and ANDROID_NDK_HOME is not set");
                 const androidApiLevel: []const u8 = options.android_api_version;
 
-                const androidSysroot = try std.fs.path.join(b.allocator, &.{androidNdkPathString,  "/toolchains/llvm/prebuilt/", hostTuple, "/sysroot"});
-                const androidLibPath = try std.fs.path.join(b.allocator, &.{androidSysroot, "/usr/lib/", androidTriple});
-                const androidApiSpecificPath =  try std.fs.path.join(b.allocator, &.{androidLibPath, androidApiLevel});
-                const androidIncludePath = try std.fs.path.join(b.allocator, &.{androidSysroot, "/usr/include"});
-                const androidArchIncludePath = try std.fs.path.join(b.allocator, &.{androidIncludePath, androidTriple});
-                const androidAsmPath = try std.fs.path.join(b.allocator, &.{androidIncludePath, "/asm-generic"});
-                const androidGluePath = try std.fs.path.join(b.allocator, &.{androidNdkPathString, "/sources/android/native_app_glue/"});
+                const androidSysroot = try std.fs.path.join(b.allocator, &.{ androidNdkPathString, "/toolchains/llvm/prebuilt/", hostTuple, "/sysroot" });
+                const androidLibPath = try std.fs.path.join(b.allocator, &.{ androidSysroot, "/usr/lib/", androidTriple });
+                const androidApiSpecificPath = try std.fs.path.join(b.allocator, &.{ androidLibPath, androidApiLevel });
+                const androidIncludePath = try std.fs.path.join(b.allocator, &.{ androidSysroot, "/usr/include" });
+                const androidArchIncludePath = try std.fs.path.join(b.allocator, &.{ androidIncludePath, androidTriple });
+                const androidAsmPath = try std.fs.path.join(b.allocator, &.{ androidIncludePath, "/asm-generic" });
+                const androidGluePath = try std.fs.path.join(b.allocator, &.{ androidNdkPathString, "/sources/android/native_app_glue/" });
 
-                raylib.addLibraryPath(.{ .cwd_relative =  androidLibPath});
+                raylib.addLibraryPath(.{ .cwd_relative = androidLibPath });
                 raylib.root_module.addLibraryPath(.{ .cwd_relative = androidApiSpecificPath });
                 raylib.addSystemIncludePath(.{ .cwd_relative = androidIncludePath });
-                raylib.addSystemIncludePath(.{ .cwd_relative = androidArchIncludePath});
-                raylib.addSystemIncludePath( .{ .cwd_relative = androidAsmPath});
-                raylib.addSystemIncludePath(.{ .cwd_relative = androidGluePath});
+                raylib.addSystemIncludePath(.{ .cwd_relative = androidArchIncludePath });
+                raylib.addSystemIncludePath(.{ .cwd_relative = androidAsmPath });
+                raylib.addSystemIncludePath(.{ .cwd_relative = androidGluePath });
 
                 var libcData = std.ArrayList(u8).init(b.allocator);
                 const writer = libcData.writer();
@@ -442,7 +446,7 @@ pub const PlatformBackend = enum {
     rgfw,
     sdl,
     drm,
-    android
+    android,
 };
 
 pub fn build(b: *std.Build) !void {
@@ -507,7 +511,7 @@ fn addExamples(
     raylib: *std.Build.Step.Compile,
 ) !*std.Build.Step {
     if (target.result.os.tag == .emscripten) {
-        @panic("Emscripten building via Zig unsupported");
+        return &b.addFail("Emscripten building via Zig unsupported").step;
     }
 
     const all = b.step(module, "All " ++ module ++ " examples");

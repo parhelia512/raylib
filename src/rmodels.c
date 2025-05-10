@@ -496,12 +496,18 @@ void DrawSphereEx(Vector3 centerPos, float radius, int rings, int slices, Color 
                     vertices[2] = (Vector3){ cosslice*vertices[2].x - sinslice*vertices[2].z, vertices[2].y, sinslice*vertices[2].x + cosslice*vertices[2].z }; // Rotation matrix around y axis
                     vertices[3] = (Vector3){ cosslice*vertices[3].x - sinslice*vertices[3].z, vertices[3].y, sinslice*vertices[3].x + cosslice*vertices[3].z };
 
+                    rlNormal3f(vertices[0].x, vertices[0].y, vertices[0].z);
                     rlVertex3f(vertices[0].x, vertices[0].y, vertices[0].z);
+                    rlNormal3f(vertices[3].x, vertices[3].y, vertices[3].z);
                     rlVertex3f(vertices[3].x, vertices[3].y, vertices[3].z);
+                    rlNormal3f(vertices[1].x, vertices[1].y, vertices[1].z);
                     rlVertex3f(vertices[1].x, vertices[1].y, vertices[1].z);
 
+                    rlNormal3f(vertices[0].x, vertices[0].y, vertices[0].z);
                     rlVertex3f(vertices[0].x, vertices[0].y, vertices[0].z);
+                    rlNormal3f(vertices[2].x, vertices[2].y, vertices[2].z);
                     rlVertex3f(vertices[2].x, vertices[2].y, vertices[2].z);
+                    rlNormal3f(vertices[3].x, vertices[3].y, vertices[3].z);
                     rlVertex3f(vertices[3].x, vertices[3].y, vertices[3].z);
                 }
 
@@ -1423,9 +1429,13 @@ void DrawMesh(Mesh mesh, Material material, Matrix transform)
 
     rlEnableTexture(material.maps[MATERIAL_MAP_DIFFUSE].texture.id);
 
-    rlEnableStatePointer(GL_VERTEX_ARRAY, mesh.vertices);
+    if (mesh.animVertices) rlEnableStatePointer(GL_VERTEX_ARRAY, mesh.animVertices);
+    else rlEnableStatePointer(GL_VERTEX_ARRAY, mesh.vertices);
+
     rlEnableStatePointer(GL_TEXTURE_COORD_ARRAY, mesh.texcoords);
-    rlEnableStatePointer(GL_NORMAL_ARRAY, mesh.normals);
+    if (mesh.normals) rlEnableStatePointer(GL_VERTEX_ARRAY, mesh.animNormalss);
+    else rlEnableStatePointer(GL_NORMAL_ARRAY, mesh.normals);
+
     rlEnableStatePointer(GL_COLOR_ARRAY, mesh.colors);
 
     rlPushMatrix();
@@ -2286,38 +2296,28 @@ void UpdateModelAnimationBones(Model model, ModelAnimation anim, int frame)
             }
         }
 
-        // Update all bones and boneMatrices of first mesh with bones.
-        for (int boneId = 0; boneId < anim.boneCount; boneId++)
-        {
-            Vector3 inTranslation = model.bindPose[boneId].translation;
-            Quaternion inRotation = model.bindPose[boneId].rotation;
-            Vector3 inScale = model.bindPose[boneId].scale;
-
-            Vector3 outTranslation = anim.framePoses[frame][boneId].translation;
-            Quaternion outRotation = anim.framePoses[frame][boneId].rotation;
-            Vector3 outScale = anim.framePoses[frame][boneId].scale;
-
-            Quaternion invRotation = QuaternionInvert(inRotation);
-            Vector3 invTranslation = Vector3RotateByQuaternion(Vector3Negate(inTranslation), invRotation);
-            Vector3 invScale = Vector3Divide((Vector3){ 1.0f, 1.0f, 1.0f }, inScale);
-
-            Vector3 boneTranslation = Vector3Add(Vector3RotateByQuaternion(
-                Vector3Multiply(outScale, invTranslation), outRotation), outTranslation);
-            Quaternion boneRotation = QuaternionMultiply(outRotation, invRotation);
-            Vector3 boneScale = Vector3Multiply(outScale, invScale);
-
-            Matrix boneMatrix = MatrixMultiply(MatrixMultiply(
-                QuaternionToMatrix(boneRotation),
-                MatrixTranslate(boneTranslation.x, boneTranslation.y, boneTranslation.z)),
-                MatrixScale(boneScale.x, boneScale.y, boneScale.z));
-
-            model.meshes[firstMeshWithBones].boneMatrices[boneId] = boneMatrix;
-        }
-
-        // Update remaining meshes with bones
-        // NOTE: Using deep copy because shallow copy results in double free with 'UnloadModel()'
         if (firstMeshWithBones != -1)
         {
+            // Update all bones and boneMatrices of first mesh with bones.
+            for (int boneId = 0; boneId < anim.boneCount; boneId++)
+            {
+                Transform *bindTransform = &model.bindPose[boneId];
+                Matrix bindMatrix = MatrixMultiply(MatrixMultiply(
+                    MatrixScale(bindTransform->scale.x, bindTransform->scale.y, bindTransform->scale.z),
+                    QuaternionToMatrix(bindTransform->rotation)),
+                    MatrixTranslate(bindTransform->translation.x, bindTransform->translation.y, bindTransform->translation.z));
+
+                Transform *targetTransform = &anim.framePoses[frame][boneId];
+                Matrix targetMatrix = MatrixMultiply(MatrixMultiply(
+                    MatrixScale(targetTransform->scale.x, targetTransform->scale.y, targetTransform->scale.z),
+                    QuaternionToMatrix(targetTransform->rotation)),
+                    MatrixTranslate(targetTransform->translation.x, targetTransform->translation.y, targetTransform->translation.z));
+
+                model.meshes[firstMeshWithBones].boneMatrices[boneId] = MatrixMultiply(MatrixInvert(bindMatrix), targetMatrix);
+            }
+
+            // Update remaining meshes with bones
+            // NOTE: Using deep copy because shallow copy results in double free with 'UnloadModel()'
             for (int i = firstMeshWithBones + 1; i < model.meshCount; i++)
             {
                 if (model.meshes[i].boneMatrices)
@@ -5211,7 +5211,7 @@ static Model LoadGLTF(const char *fileName)
     /*********************************************************************************************
 
         Function implemented by Wilhem Barbier(@wbrbr), with modifications by Tyler Bezera(@gamerfiend)
-        Transform handling implemented by Paul Melis (@paulmelis).
+        Transform handling implemented by Paul Melis (@paulmelis)
         Reviewed by Ramon Santamaria (@raysan5)
 
         FEATURES:
@@ -5221,10 +5221,10 @@ static Model LoadGLTF(const char *fileName)
                      PBR specular/glossiness flow and extended texture flows not supported
           - Supports multiple meshes per model (every primitives is loaded as a separate mesh)
           - Supports basic animations
-          - Transforms, including parent-child relations, are applied on the mesh data, but the
-            hierarchy is not kept (as it can't be represented).
+          - Transforms, including parent-child relations, are applied on the mesh data,
+            but the hierarchy is not kept (as it can't be represented)
           - Mesh instances in the glTF file (i.e. same mesh linked from multiple nodes)
-            are turned into separate raylib Meshes.
+            are turned into separate raylib Meshes
 
         RESTRICTIONS:
           - Only triangle meshes supported
@@ -5440,7 +5440,7 @@ static Model LoadGLTF(const char *fileName)
         // Any glTF mesh linked from more than one Node (i.e. instancing)
         // is turned into multiple Mesh's, as each Node will have its own
         // transform applied.
-        // Note: the code below disregards the scenes defined in the file, all nodes are used.
+        // NOTE: The code below disregards the scenes defined in the file, all nodes are used.
         //----------------------------------------------------------------------------------------------------
         int meshIndex = 0;
         for (unsigned int i = 0; i < data->nodes_count; i++)
@@ -5825,15 +5825,17 @@ static Model LoadGLTF(const char *fileName)
 
             for (unsigned int p = 0; p < mesh->primitives_count; p++)
             {
+                bool hasJoints = false;
+
                 // NOTE: We only support primitives defined by triangles
                 if (mesh->primitives[p].type != cgltf_primitive_type_triangles) continue;
 
                 for (unsigned int j = 0; j < mesh->primitives[p].attributes_count; j++)
                 {
                     // NOTE: JOINTS_1 + WEIGHT_1 will be used for +4 joints influencing a vertex -> Not supported by raylib
-
                     if (mesh->primitives[p].attributes[j].type == cgltf_attribute_type_joints) // JOINTS_n (vec4: 4 bones max per vertex / u8, u16)
                     {
+                        hasJoints = true;
                         cgltf_accessor *attribute = mesh->primitives[p].attributes[j].data;
 
                         // NOTE: JOINTS_n can only be vec4 and u8/u16
@@ -5888,7 +5890,6 @@ static Model LoadGLTF(const char *fileName)
 
                         if (attribute->type == cgltf_type_vec4)
                         {
-                            // TODO: Support component types: u8, u16?
                             if (attribute->component_type == cgltf_component_type_r_8u)
                             {
                                 // Init raylib mesh bone weight to copy glTF attribute data
@@ -5924,6 +5925,7 @@ static Model LoadGLTF(const char *fileName)
 
                                 // Load 4 components of float data type into mesh.boneWeights
                                 // for cgltf_attribute_type_weights we have:
+
                                 //   - data.meshes[0] (256 vertices)
                                 //   - 256 values, provided as cgltf_type_vec4 of float (4 byte per joint, stride 16)
                                 LOAD_ATTRIBUTE(attribute, 4, float, model.meshes[meshIndex].boneWeights)
@@ -5931,6 +5933,33 @@ static Model LoadGLTF(const char *fileName)
                             else TRACELOG(LOG_WARNING, "MODEL: [%s] Joint weight attribute data format not supported, use vec4 float", fileName);
                         }
                         else TRACELOG(LOG_WARNING, "MODEL: [%s] Joint weight attribute data format not supported, use vec4 float", fileName);
+                    }
+                }
+
+                // Check if we are animated, and the mesh was not given any bone assignments, but is the child of a bone node
+                // in this case we need to fully attach all the verts to the parent bone so it will animate with the bone
+                if (data->skins_count > 0 && !hasJoints && node->parent != NULL && node->parent->mesh == NULL)
+                {
+                    int parentBoneId = -1;
+                    for (int joint = 0; joint < model.boneCount; joint++)
+                    {
+                        if (data->skins[0].joints[joint] == node->parent)
+                        {
+                            parentBoneId = joint;
+                            break;
+                        }
+                    }
+
+                    if (parentBoneId >= 0)
+                    {
+                        model.meshes[meshIndex].boneIds = RL_CALLOC(model.meshes[meshIndex].vertexCount*4, sizeof(unsigned char));
+                        model.meshes[meshIndex].boneWeights = RL_CALLOC(model.meshes[meshIndex].vertexCount*4, sizeof(float));
+
+                        for (int vertexIndex = 0; vertexIndex < model.meshes[meshIndex].vertexCount*4; vertexIndex += 4)
+                        {
+                            model.meshes[meshIndex].boneIds[vertexIndex] = (unsigned char)parentBoneId;
+                            model.meshes[meshIndex].boneWeights[vertexIndex] = 1.0f;
+                        }
                     }
                 }
 
@@ -5952,9 +5981,8 @@ static Model LoadGLTF(const char *fileName)
                     model.meshes[meshIndex].boneMatrices[j] = MatrixIdentity();
                 }
 
-                meshIndex++;       // Move to next mesh
+                meshIndex++; // Move to next mesh
             }
-
         }
 
         // Free all cgltf loaded data
